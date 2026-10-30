@@ -1,0 +1,781 @@
+package com.hyeja.domain.policy.service;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.hyeja.domain.member.entity.Member;
+import com.hyeja.domain.favorite.repository.FavoriteRepository;
+import com.hyeja.domain.policy.converter.PolicyApiCodeConverter;
+import com.hyeja.domain.policy.converter.PolicyApiConverter;
+import com.hyeja.domain.policy.dto.PolicyApiResponseDTO.PolicyItem;
+import com.hyeja.domain.policy.dto.PolicyApiResponseDTO;
+import com.hyeja.domain.policy.dto.PolicyDetailResponseDTO;
+import com.hyeja.domain.policy.dto.PolicyGuestResponseDTO;
+import com.hyeja.domain.policy.dto.PolicyResponseDTO.PolicyListDTO;
+import com.hyeja.domain.policy.entity.Policy;
+import com.hyeja.domain.policy.entity.PolicyRegion;
+import com.hyeja.domain.policy.enums.PolicyCategory;
+import com.hyeja.domain.policy.enums.PolicyEmploymentCondition;
+import com.hyeja.domain.policy.enums.PolicyMarriageCondition;
+import com.hyeja.domain.policy.enums.PolicyIncomeCondition;
+import com.hyeja.domain.policy.enums.PolicyApplyPeriod;
+import com.hyeja.domain.policy.enums.PolicyHouselessRequirement;
+import com.hyeja.domain.policy.enums.PolicySort;
+import com.hyeja.domain.policy.repository.PolicyRepository;
+import com.hyeja.domain.policy.repository.PolicyRegionRepository;
+import com.hyeja.domain.profile.entity.Profile;
+import com.hyeja.domain.profile.enums.EmploymentStatus;
+import com.hyeja.domain.profile.service.ProfileService;
+import com.hyeja.domain.region.entity.Region;
+import com.hyeja.domain.term.entity.Term;
+import com.hyeja.domain.term.repository.TermRepository;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import org.junit.jupiter.api.Test;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.client.RestTemplate;
+
+class PolicyServiceTest {
+    private final PolicyRepository policyRepository = mock(PolicyRepository.class);
+    private final RestTemplate restTemplate = mock(RestTemplate.class);
+    private final PolicyApiCodeConverter codeConverter = new PolicyApiCodeConverter();
+    private final PolicyApiConverter apiConverter = new PolicyApiConverter(codeConverter);
+    private final PolicyAiAnalyzer policyAiAnalyzer = mock(PolicyAiAnalyzer.class);
+    private final PolicySyncItemService policySyncItemService = mock(PolicySyncItemService.class);
+    private final ProfileService profileService = mock(ProfileService.class);
+    private final PolicyRegionRepository policyRegionRepository = mock(PolicyRegionRepository.class);
+    private final FavoriteRepository favoriteRepository = mock(FavoriteRepository.class);
+    private final TermRepository termRepository = mock(TermRepository.class);
+    private final Clock clock = Clock.fixed(
+            Instant.parse("2026-09-27T00:00:00Z"),
+            ZoneId.of("Asia/Seoul"));
+    private final PolicyEligibilityEvaluator policyEligibilityEvaluator =
+            new PolicyEligibilityEvaluator(new PolicyIncomeEligibilityEvaluator(), clock);
+    private final PolicyService service = new PolicyService(
+            policyRepository, restTemplate, codeConverter, policyAiAnalyzer,
+            policySyncItemService, profileService,
+            policyRegionRepository, policyEligibilityEvaluator, favoriteRepository,
+            termRepository, clock);
+
+    @Test
+    void mapsYouthPolicyApiFieldsToPolicyEntity() {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("202609250001");
+        item.setPolicyName(" 청년 주거 지원 ");
+        item.setCategory("주거");
+        item.setSubCategory("주택 및 거주지");
+        item.setKeywords("청년,월세");
+        item.setPolicyExplanation("API에서 받은 원문 설명");
+        item.setSupportContent("월 20만 원 지원");
+        item.setMinAge("19"); item.setMaxAge("39"); item.setAgeLimitYn("Y");
+        item.setIncomeConditionCode("0043002");
+        item.setIncomeMin("100"); item.setIncomeMax("300");
+        item.setIncomeEtc("기준중위소득 기준");
+        item.setMarriageCode("0055001");
+        item.setEmploymentCodes("0013001,0013002");
+        item.setApplyPeriodCode("0057001");
+        item.setExtraQualification("서울 거주");
+        item.setParticipantTarget("무주택 청년");
+        item.setApplyYmd("20260901 ~ 20260930");
+        item.setApplyMethod("온라인 신청");
+        item.setApplyUrl("https://example.com/apply");
+        item.setReferenceUrl1("https://example.com/reference");
+        item.setViewCount("123");
+        item.setApprovalStatusCode("0044002");
+
+        Policy policy = apiConverter.convert(item, PolicyCategory.MONTHLY_RENT,
+                PolicyHouselessRequirement.REQUIRED,
+                PolicyIncomeCondition.COMPARABLE, 100, 300);
+
+        assertThat(policy.getPolicyId()).isEqualTo("202609250001");
+        assertThat(policy.getPolicyName()).isEqualTo("청년 주거 지원");
+        assertThat(policy.getApiSubCategory()).isEqualTo("주택 및 거주지");
+        assertThat(policy.getCategories()).containsExactly(PolicyCategory.MONTHLY_RENT);
+        assertThat(policy.getDescription()).isNull();
+        assertThat(policy.getSupportContent()).isEqualTo("월 20만 원 지원");
+        assertThat(policy.getMinAge()).isEqualTo(19);
+        assertThat(policy.getMaxAge()).isEqualTo(39);
+        assertThat(policy.getAgeLimitYn()).isTrue();
+        assertThat(policy.getIncomeMin()).isEqualTo(100);
+        assertThat(policy.getIncomeMax()).isEqualTo(300);
+        assertThat(policy.getMarriageCode()).isEqualTo(PolicyMarriageCondition.MARRIED);
+        assertThat(policy.getEmploymentCodes()).containsExactlyInAnyOrder(
+                PolicyEmploymentCondition.EMPLOYED,
+                PolicyEmploymentCondition.SELF_EMPLOYED);
+        assertThat(policy.getHouselessRequirement())
+                .isEqualTo(PolicyHouselessRequirement.REQUIRED);
+        assertThat(policy.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.SPECIFIC_PERIOD);
+        assertThat(policy.getHousingType()).isEqualTo("주택 및 거주지");
+        assertThat(policy.getExtraQualification()).contains("서울 거주", "무주택 청년");
+        assertThat(policy.getApplyStartDate()).isEqualTo(LocalDate.of(2026, 9, 1));
+        assertThat(policy.getApplyEndDate()).isEqualTo(LocalDate.of(2026, 9, 30));
+        assertThat(policy.getViewCount()).isEqualTo(123);
+        assertThat(policy.getActiveYn()).isTrue();
+    }
+
+    @Test
+    void safelyMapsBlankAndNonNumericOptionalValues() {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("policy-2"); item.setPolicyName(" "); item.setCategory("주거");
+        item.setMinAge("-"); item.setApplyYmd("2026년 연중");
+        item.setApplyPeriodCode("57002");
+
+        Policy policy = apiConverter.convert(item, PolicyCategory.OTHER, null,
+                PolicyIncomeCondition.UNKNOWN, null, null);
+
+        assertThat(policy.getPolicyName()).isEqualTo("제목 없음");
+        assertThat(policy.getMinAge()).isNull();
+        assertThat(policy.getApplyStartDate()).isNull();
+        assertThat(policy.getApplyEndDate()).isNull();
+        assertThat(policy.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.ALWAYS);
+        assertThat(policy.getViewCount()).isZero();
+    }
+
+    @Test
+    void mapsApplyPeriodCodesAndUsesDatesOnlyForSpecificPeriod() {
+        PolicyItem specific = new PolicyItem();
+        specific.setPolicyId("specific");
+        specific.setPolicyName("특정기간 정책");
+        specific.setApplyPeriodCode("0057001");
+        specific.setApplyYmd("20260901 ~ 20260930");
+
+        PolicyItem always = new PolicyItem();
+        always.setPolicyId("always");
+        always.setPolicyName("상시 정책");
+        always.setApplyPeriodCode("57002");
+        always.setApplyYmd("20260901 ~ 20260930");
+
+        PolicyItem closed = new PolicyItem();
+        closed.setPolicyId("closed");
+        closed.setPolicyName("마감 정책");
+        closed.setApplyPeriodCode("57003");
+        closed.setApplyYmd("20260901 ~ 20260930");
+
+        Policy specificPolicy = apiConverter.convert(specific, PolicyCategory.OTHER,
+                PolicyHouselessRequirement.UNKNOWN,
+                PolicyIncomeCondition.UNKNOWN, null, null);
+        Policy alwaysPolicy = apiConverter.convert(always, PolicyCategory.OTHER,
+                PolicyHouselessRequirement.UNKNOWN,
+                PolicyIncomeCondition.UNKNOWN, null, null);
+        Policy closedPolicy = apiConverter.convert(closed, PolicyCategory.OTHER,
+                PolicyHouselessRequirement.UNKNOWN,
+                PolicyIncomeCondition.UNKNOWN, null, null);
+
+        assertThat(specificPolicy.getApplyPeriodCode())
+                .isEqualTo(PolicyApplyPeriod.SPECIFIC_PERIOD);
+        assertThat(specificPolicy.getApplyStartDate()).isEqualTo(LocalDate.of(2026, 9, 1));
+        assertThat(specificPolicy.getApplyEndDate()).isEqualTo(LocalDate.of(2026, 9, 30));
+        assertThat(alwaysPolicy.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.ALWAYS);
+        assertThat(alwaysPolicy.getApplyStartDate()).isNull();
+        assertThat(alwaysPolicy.getApplyEndDate()).isNull();
+        assertThat(closedPolicy.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.CLOSED);
+        assertThat(closedPolicy.getApplyStartDate()).isNull();
+        assertThat(closedPolicy.getApplyEndDate()).isNull();
+    }
+
+    @Test
+    void mapsZeroAgeRangeToNoAgeLimit() {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("no-age-limit-policy");
+        item.setPolicyName("연령 제한 없는 정책");
+        item.setMinAge("0");
+        item.setMaxAge("0");
+        item.setAgeLimitYn("Y");
+        item.setApplyPeriodCode("57002");
+
+        Policy policy = apiConverter.convert(item, PolicyCategory.OTHER, null,
+                PolicyIncomeCondition.UNKNOWN, null, null);
+
+        assertThat(policy.getMinAge()).isNull();
+        assertThat(policy.getMaxAge()).isNull();
+        assertThat(policy.getAgeLimitYn()).isFalse();
+    }
+
+    @Test
+    void mapsNonApprovedPolicyAsInactive() {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("policy-3");
+        item.setPolicyName("승인 대기 정책");
+        item.setCategory("주거");
+        item.setApprovalStatusCode("NOT_APPROVED");
+        item.setApplyPeriodCode("57003");
+
+        assertThat(apiConverter.convert(item, PolicyCategory.OTHER, null,
+                PolicyIncomeCondition.UNKNOWN, null, null).getActiveYn()).isFalse();
+    }
+
+    @Test
+    void mapsMarriageConditionCodesToReadableValues() {
+        assertThat(mapMarriageCondition("0055001")).isEqualTo(PolicyMarriageCondition.MARRIED);
+        assertThat(mapMarriageCondition("55002")).isEqualTo(PolicyMarriageCondition.SINGLE);
+        assertThat(mapMarriageCondition("0055003"))
+                .isEqualTo(PolicyMarriageCondition.NO_RESTRICTION);
+        assertThat(mapMarriageCondition("unknown")).isNull();
+        assertThat(mapMarriageCondition(" ")).isNull();
+    }
+
+    @Test
+    void mapsEmploymentCodesToReadableValues() {
+        assertThat(mapEmploymentConditions("0013001"))
+                .containsExactly(PolicyEmploymentCondition.EMPLOYED);
+        assertThat(mapEmploymentConditions("13002"))
+                .containsExactly(PolicyEmploymentCondition.SELF_EMPLOYED);
+        assertThat(mapEmploymentConditions("0013003"))
+                .containsExactly(PolicyEmploymentCondition.UNEMPLOYED);
+        assertThat(mapEmploymentConditions("13004"))
+                .containsExactly(PolicyEmploymentCondition.FREELANCER);
+        assertThat(mapEmploymentConditions("0013005"))
+                .containsExactly(PolicyEmploymentCondition.DAILY_WORKER);
+        assertThat(mapEmploymentConditions("13006"))
+                .containsExactly(PolicyEmploymentCondition.ENTREPRENEUR);
+        assertThat(mapEmploymentConditions("0013007"))
+                .containsExactly(PolicyEmploymentCondition.SHORT_TERM_WORKER);
+        assertThat(mapEmploymentConditions("13008"))
+                .containsExactly(PolicyEmploymentCondition.FARMER);
+        assertThat(mapEmploymentConditions("0013009"))
+                .containsExactly(PolicyEmploymentCondition.OTHER);
+        assertThat(mapEmploymentConditions("13010"))
+                .containsExactly(PolicyEmploymentCondition.NO_RESTRICTION);
+        assertThat(mapEmploymentConditions("0013001,0013004"))
+                .containsExactlyInAnyOrder(
+                        PolicyEmploymentCondition.EMPLOYED,
+                        PolicyEmploymentCondition.FREELANCER);
+        assertThat(mapEmploymentConditions("unknown")).isEmpty();
+    }
+
+    @Test
+    void doesNotSaveNonApprovedHousingPolicy() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+
+        PolicyItem rejected = new PolicyItem();
+        rejected.setPolicyId("rejected-policy");
+        rejected.setPolicyName("반려된 주거 정책");
+        rejected.setCategory("주거");
+        rejected.setApprovalStatusCode("44003");
+
+        PolicyApiResponseDTO.Pagging pagging = new PolicyApiResponseDTO.Pagging();
+        pagging.setTotCount(1);
+        PolicyApiResponseDTO.ResultData result = new PolicyApiResponseDTO.ResultData();
+        result.setPagging(pagging);
+        result.setYouthPolicyList(List.of(rejected));
+        PolicyApiResponseDTO response = new PolicyApiResponseDTO();
+        response.setResult(result);
+
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class))).thenReturn(response);
+
+        assertThat(service.fetchAndSaveHousingPolicies()).isZero();
+        verify(policySyncItemService, never()).save(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        verify(policyAiAnalyzer, never()).analyze(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void savesCategoryReturnedByAiClassifier() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("ai-policy");
+        item.setPolicyName("청년 임대주택 정책");
+        item.setCategory("주거");
+        item.setApprovalStatusCode("44002");
+
+        PolicyApiResponseDTO.Pagging pagging = new PolicyApiResponseDTO.Pagging();
+        pagging.setTotCount(1);
+        PolicyApiResponseDTO.ResultData result = new PolicyApiResponseDTO.ResultData();
+        result.setPagging(pagging);
+        result.setYouthPolicyList(List.of(item));
+        PolicyApiResponseDTO response = new PolicyApiResponseDTO();
+        response.setResult(result);
+
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class))).thenReturn(response);
+        PolicyAiAnalysis analysis = new PolicyAiAnalysis(
+                "청년에게 공공임대주택 입주 기회를 제공합니다.",
+                Set.of(PolicyCategory.PUBLIC_RENT), 0.95, "공공임대주택 입주 정책",
+                PolicyHouselessRequirement.REQUIRED, 0.91, "무주택 세대구성원 조건이 명시됨",
+                PolicyIncomeCondition.COMPARABLE, null, 50_000_000,
+                0.90, "개인 연소득 5천만원 이하");
+        when(policyAiAnalyzer.analyze(item)).thenReturn(analysis);
+
+        assertThat(service.fetchAndSaveHousingPolicies()).isEqualTo(1);
+        verify(policySyncItemService).save(item, analysis);
+    }
+
+    @Test
+    void skipsFailedItemAndContinuesWithNextPolicy() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+
+        PolicyItem failed = approvedHousingPolicy("failed-policy");
+        PolicyItem succeeded = approvedHousingPolicy("succeeded-policy");
+        PolicyApiResponseDTO.Pagging pagging = new PolicyApiResponseDTO.Pagging();
+        pagging.setTotCount(2);
+        PolicyApiResponseDTO.ResultData result = new PolicyApiResponseDTO.ResultData();
+        result.setPagging(pagging);
+        result.setYouthPolicyList(List.of(failed, succeeded));
+        PolicyApiResponseDTO response = new PolicyApiResponseDTO();
+        response.setResult(result);
+
+        PolicyAiAnalysis analysis = new PolicyAiAnalysis(
+                "기타 주거 지원 정책입니다.",
+                Set.of(PolicyCategory.OTHER), 0.8, "기타 주거 정책",
+                PolicyHouselessRequirement.UNKNOWN, 0.5, "확인 필요",
+                PolicyIncomeCondition.UNKNOWN, null, null,
+                0.5, "확인 필요");
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class))).thenReturn(response);
+        when(policyAiAnalyzer.analyze(failed)).thenThrow(new RuntimeException("timeout"));
+        when(policyAiAnalyzer.analyze(succeeded)).thenReturn(analysis);
+
+        assertThat(service.fetchAndSaveHousingPolicies()).isEqualTo(1);
+        verify(policySyncItemService).save(succeeded, analysis);
+        verify(policySyncItemService, never()).save(
+                org.mockito.ArgumentMatchers.eq(failed), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void storesCategoryProvidedByAiClassifier() {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("ai-category-policy");
+        item.setPolicyName("청년 주거 정책");
+        item.setApplyPeriodCode("57002");
+
+        Policy policy = apiConverter.convert(item, PolicyCategory.PUBLIC_RENT, null,
+                PolicyIncomeCondition.UNKNOWN, null, null);
+
+        assertThat(policy.getCategories()).containsExactly(PolicyCategory.PUBLIC_RENT);
+    }
+
+    @Test
+    void loadsAtMostConfiguredPages() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+
+        PolicyItem nonHousing = new PolicyItem();
+        nonHousing.setPolicyId("non-housing");
+        nonHousing.setCategory("일자리");
+
+        PolicyApiResponseDTO.Pagging pagging = new PolicyApiResponseDTO.Pagging();
+        pagging.setTotCount(10_000);
+        PolicyApiResponseDTO.ResultData result = new PolicyApiResponseDTO.ResultData();
+        result.setPagging(pagging);
+        result.setYouthPolicyList(List.of(nonHousing));
+        PolicyApiResponseDTO response = new PolicyApiResponseDTO();
+        response.setResult(result);
+
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class))).thenReturn(response);
+
+        assertThat(service.fetchAndSaveHousingPolicies()).isZero();
+        int configuredMaxPages = (int) ReflectionTestUtils.getField(
+                PolicyService.class, "MAX_PAGES");
+        verify(restTemplate, times(configuredMaxPages)).getForObject(
+                org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class));
+    }
+
+    // 대분류가 "주거,주거"처럼 여러 개여도 주거가 있으면 수집하고, 주거가 없으면 건너뜁니다.
+    @Test
+    void savesPolicyWhoseCategoryListContainsHousing() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+        PolicyItem duplicated = approvedHousingPolicy("duplicated-housing");
+        duplicated.setCategory("주거,주거");
+        PolicyItem other = approvedHousingPolicy("not-housing");
+        other.setCategory("일자리,복지문화");
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class)))
+                .thenReturn(page(2, duplicated, other));
+
+        assertThat(service.fetchAndSaveHousingPolicies()).isEqualTo(1);
+        verify(policySyncItemService).save(org.mockito.ArgumentMatchers.eq(duplicated), org.mockito.ArgumentMatchers.any());
+        verify(policySyncItemService, never()).save(org.mockito.ArgumentMatchers.eq(other), org.mockito.ArgumentMatchers.any());
+    }
+
+    // 한 페이지 요청이 한 번 실패해도 다시 시도해서 이어서 수집합니다.
+    @Test
+    void retriesFailedPageOnceAndContinues() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+        PolicyItem first = approvedHousingPolicy("page-1");
+        PolicyItem second = approvedHousingPolicy("page-2");
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class)))
+                .thenReturn(page(200, first))
+                .thenThrow(new org.springframework.web.client.ResourceAccessException("Connection reset"))
+                .thenReturn(page(200, second));
+
+        assertThat(service.fetchAndSaveHousingPolicies()).isEqualTo(2);
+        verify(policySyncItemService).save(org.mockito.ArgumentMatchers.eq(second), org.mockito.ArgumentMatchers.any());
+    }
+
+    // 다시 시도해도 실패하면 거기서 멈추고, "완료" 대신 멈춘 페이지·저장 건수를 담은 POLICY_002를 던집니다.
+    @Test
+    void stopsAndReportsStoppedPageWhenPageFailsTwice() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class)))
+                .thenReturn(page(300, approvedHousingPolicy("page-1")))
+                .thenThrow(new org.springframework.web.client.ResourceAccessException("Connection reset"));
+
+        assertThatThrownBy(() -> service.fetchAndSaveHousingPolicies())
+                .isInstanceOf(com.hyeja.global.exception.GeneralException.class)
+                .satisfies(exception -> {
+                    com.hyeja.global.exception.GeneralException error =
+                            (com.hyeja.global.exception.GeneralException) exception;
+                    assertThat(error.getCode()).isEqualTo(com.hyeja.global.apiPayload.status.ErrorStatus.POLICY_SYNC_STOPPED);
+                    assertThat(error.getResult()).isEqualTo(java.util.Map.of("stoppedPage", 2, "savedCount", 1));
+                });
+        // 1페이지에서 저장한 정책은 남습니다.
+        verify(policySyncItemService).save(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        // 1페이지 1번 + 2페이지 2번(재시도 포함). 3페이지는 요청하지 않습니다.
+        verify(restTemplate, times(3)).getForObject(
+                org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class));
+    }
+
+    // 1페이지부터 실패하면 예전처럼 "0건 완료"로 조용히 끝나지 않고 중단으로 알립니다.
+    @Test
+    void reportsStopWhenFirstPageFails() {
+        ReflectionTestUtils.setField(service, "apiKey", "test-key");
+        ReflectionTestUtils.setField(service, "apiUrl", "https://example.com/policies");
+        when(restTemplate.getForObject(org.mockito.ArgumentMatchers.any(java.net.URI.class),
+                org.mockito.ArgumentMatchers.eq(PolicyApiResponseDTO.class)))
+                .thenThrow(new org.springframework.web.client.HttpServerErrorException(
+                        org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR));
+
+        assertThatThrownBy(() -> service.fetchAndSaveHousingPolicies())
+                .extracting("result")
+                .isEqualTo(java.util.Map.of("stoppedPage", 1, "savedCount", 0));
+    }
+
+    private PolicyApiResponseDTO page(int totCount, PolicyItem... items) {
+        PolicyApiResponseDTO.Pagging pagging = new PolicyApiResponseDTO.Pagging();
+        pagging.setTotCount(totCount);
+        PolicyApiResponseDTO.ResultData result = new PolicyApiResponseDTO.ResultData();
+        result.setPagging(pagging);
+        result.setYouthPolicyList(List.of(items));
+        PolicyApiResponseDTO response = new PolicyApiResponseDTO();
+        response.setResult(result);
+        return response;
+    }
+
+    private PolicyMarriageCondition mapMarriageCondition(String code) {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("marriage-test");
+        item.setPolicyName("혼인 조건 테스트");
+        item.setCategory("주거");
+        item.setMarriageCode(code);
+        item.setApplyPeriodCode("57002");
+        return apiConverter.convert(item, PolicyCategory.OTHER, null,
+                PolicyIncomeCondition.UNKNOWN, null, null).getMarriageCode();
+    }
+
+    private PolicyItem approvedHousingPolicy(String policyId) {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId(policyId);
+        item.setPolicyName(policyId);
+        item.setCategory("주거");
+        item.setApprovalStatusCode("44002");
+        return item;
+    }
+
+    @Test
+    void returnsGuestPolicyPageWithRegionsAndDeadlineInformation() {
+        LocalDate today = LocalDate.now(clock);
+        Region region = Region.builder()
+                .regionCode("11440")
+                .sigunguName("서울특별시 마포구")
+                .build();
+        Policy regionalPolicy = Policy.builder()
+                .policyId("POLICY-1")
+                .policyName("청년 월세 지원")
+                .categories(Set.of(PolicyCategory.MONTHLY_RENT))
+                .ageLimitYn(false)
+                .applyPeriodCode(PolicyApplyPeriod.SPECIFIC_PERIOD)
+                .applyEndDate(today.plusDays(4))
+                .build();
+        Policy alwaysOpenPolicy = Policy.builder()
+                .policyId("POLICY-2")
+                .policyName("상시 주거 상담")
+                .categories(Set.of(PolicyCategory.OTHER))
+                .ageLimitYn(false)
+                .applyPeriodCode(PolicyApplyPeriod.ALWAYS)
+                .applyEndDate(null)
+                .build();
+        PageRequest pageRequest = PageRequest.of(0, 8, PolicySort.DEADLINE.toSort());
+        when(policyRepository.findGuestHousingPolicies(
+                PolicyCategory.MONTHLY_RENT.name(), today, pageRequest))
+                .thenReturn(new PageImpl<>(
+                        List.of(regionalPolicy, alwaysOpenPolicy), pageRequest, 9));
+        when(policyRegionRepository.findAllActiveByPolicyIds(
+                List.of("POLICY-1", "POLICY-2")))
+                .thenReturn(List.of(PolicyRegion.builder()
+                        .policy(regionalPolicy)
+                        .region(region)
+                        .build()));
+
+        PolicyGuestResponseDTO.PolicyListDTO result = service.getGuestHousingPolicies(
+                PolicyCategory.MONTHLY_RENT, PolicySort.DEADLINE, 0, 8);
+
+        assertThat(result.getPolicies()).hasSize(2);
+        assertThat(result.getPolicies().get(0)).satisfies(item -> {
+            assertThat(item.getPolicyId()).isEqualTo("POLICY-1");
+            assertThat(item.getCategoryCodes()).containsExactly(PolicyCategory.MONTHLY_RENT);
+            assertThat(item.getCategoryNames()).containsExactly("월세");
+            assertThat(item.getRegions()).singleElement().satisfies(itemRegion -> {
+                assertThat(itemRegion.getRegionCode()).isEqualTo("11440");
+                assertThat(itemRegion.getRegionName()).isEqualTo("서울특별시 마포구");
+            });
+            assertThat(item.isNationwide()).isFalse();
+            assertThat(item.getRegionSummary()).isEqualTo("서울특별시 마포구");
+            assertThat(item.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.SPECIFIC_PERIOD);
+            assertThat(item.getDDay()).isEqualTo(4);
+        });
+        assertThat(result.getPolicies().get(1)).satisfies(item -> {
+            assertThat(item.getPolicyId()).isEqualTo("POLICY-2");
+            assertThat(item.getRegions()).isEmpty();
+            assertThat(item.isNationwide()).isTrue();
+            assertThat(item.getRegionSummary()).isEqualTo("전국");
+            assertThat(item.getApplyEndDate()).isNull();
+            assertThat(item.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.ALWAYS);
+            assertThat(item.getDDay()).isNull();
+        });
+        assertThat(result.getTotalElements()).isEqualTo(9);
+        assertThat(result.getTotalPages()).isEqualTo(2);
+        assertThat(result.isHasNext()).isTrue();
+    }
+
+    @Test
+    void returnsPolicyDetailWithFiveMemberEligibilityConditions() {
+        Policy policy = mock(Policy.class);
+        when(policy.getPolicyId()).thenReturn("policy-detail");
+        when(policy.getPolicyName()).thenReturn("청년 주거 정책");
+        when(policy.getCategories()).thenReturn(Set.of(PolicyCategory.OTHER));
+        when(policy.getAgeLimitYn()).thenReturn(true);
+        when(policy.getIncomeConditionCode()).thenReturn(PolicyIncomeCondition.UNKNOWN);
+        when(policy.getExtraQualification()).thenReturn(
+                "중위소득 60% 이하인 무주택자");
+
+        Term incomeTerm = Term.builder()
+                .term("중위소득")
+                .easyDescription("전체 가구 소득의 중간값")
+                .build();
+        ReflectionTestUtils.setField(incomeTerm, "termId", 1L);
+        Term unrelatedTerm = Term.builder()
+                .term("신혼부부")
+                .easyDescription("혼인한 지 얼마 되지 않은 부부")
+                .build();
+        ReflectionTestUtils.setField(unrelatedTerm, "termId", 2L);
+        Term blankTerm = Term.builder()
+                .term(" ")
+                .easyDescription("빈 용어")
+                .build();
+        ReflectionTestUtils.setField(blankTerm, "termId", 3L);
+
+        Profile profile = mock(Profile.class);
+
+        when(policyRepository.findById("policy-detail")).thenReturn(Optional.of(policy));
+        when(profileService.getActiveProfile(1L)).thenReturn(profile);
+        when(policyRegionRepository.findAllByPolicy_PolicyId("policy-detail"))
+                .thenReturn(List.of());
+        when(favoriteRepository
+                .existsByMemberMemberIdAndPolicyPolicyIdAndDeletedAtIsNull(1L, "policy-detail"))
+                .thenReturn(true);
+        when(termRepository.findAllByDeletedAtIsNullOrderByTermIdAsc())
+                .thenReturn(List.of(incomeTerm, unrelatedTerm, blankTerm));
+
+        PolicyDetailResponseDTO response =
+                service.getPolicyDetailForMember("policy-detail", 1L);
+
+        assertThat(response.policyId()).isEqualTo("policy-detail");
+        assertThat(response.conditions()).hasSize(5);
+        assertThat(response.isFavorite()).isTrue();
+        assertThat(response.terms()).containsExactly(
+                new PolicyDetailResponseDTO.TermSummaryDTO(1L, "중위소득"));
+        assertThat(response.overallStatus()).isEqualTo(
+                com.hyeja.domain.policy.enums.EligibilityStatus.UNKNOWN);
+    }
+
+    // 비로그인(memberId null)은 판정 없이 정책 정보만 내려줍니다.
+    @Test
+    void returnsPolicyDetailWithoutConditionsForGuest() {
+        Policy policy = mock(Policy.class);
+        when(policy.getPolicyId()).thenReturn("policy-detail");
+        when(policy.getPolicyName()).thenReturn("청년 주거 정책");
+        when(policy.getCategories()).thenReturn(Set.of(PolicyCategory.OTHER));
+        when(policyRepository.findById("policy-detail")).thenReturn(Optional.of(policy));
+
+        PolicyDetailResponseDTO response = service.getPolicyDetailForMember("policy-detail", null);
+
+        assertThat(response.policyName()).isEqualTo("청년 주거 정책");
+        assertThat(response.conditions()).isEmpty();
+        assertThat(response.overallStatus()).isNull();
+        assertThat(response.isFavorite()).isFalse();
+        org.mockito.Mockito.verifyNoInteractions(profileService, favoriteRepository);
+    }
+
+    // 탈퇴한 회원의 토큰이면 목록 조회와 같이 MEMBER_001입니다.
+    @Test
+    void rejectsPolicyDetailForWithdrawnMember() {
+        when(policyRepository.findById("policy-detail")).thenReturn(Optional.of(mock(Policy.class)));
+        when(profileService.getActiveProfile(1L)).thenThrow(
+                new com.hyeja.global.exception.GeneralException(
+                        com.hyeja.global.apiPayload.status.ErrorStatus.MEMBER_NOT_FOUND));
+
+        assertThatThrownBy(() -> service.getPolicyDetailForMember("policy-detail", 1L))
+                .extracting("code")
+                .isEqualTo(com.hyeja.global.apiPayload.status.ErrorStatus.MEMBER_NOT_FOUND);
+    }
+
+    @Test
+    void returnsSingleOriginalPolicyRegionInMemberDetail() {
+        Policy policy = mock(Policy.class);
+        when(policy.getPolicyId()).thenReturn("busan-policy");
+        when(policy.getPolicyName()).thenReturn("부산 청년 정책");
+        when(policy.getCategories()).thenReturn(Set.of(PolicyCategory.OTHER));
+        when(policy.getAgeLimitYn()).thenReturn(false);
+        when(policy.getIncomeConditionCode()).thenReturn(PolicyIncomeCondition.NO_RESTRICTION);
+        when(policy.getEmploymentCodes()).thenReturn(
+                Set.of(PolicyEmploymentCondition.NO_RESTRICTION));
+        when(policy.getHouselessRequirement())
+                .thenReturn(PolicyHouselessRequirement.NOT_REQUIRED);
+
+        Region policyRegion = Region.builder()
+                .regionCode("26000")
+                .sigunguName("부산광역시")
+                .build();
+        PolicyRegion policyRegionLink = PolicyRegion.builder()
+                .policy(policy)
+                .region(policyRegion)
+                .build();
+
+        Region memberRegion = Region.builder()
+                .regionCode("11200")
+                .sigunguName("서울특별시 성동구")
+                .build();
+        Profile profile = mock(Profile.class);
+        when(profile.getRegion()).thenReturn(memberRegion);
+        when(profile.getEmploymentCode()).thenReturn(EmploymentStatus.UNEMPLOYED);
+        when(profile.getHouselessYn()).thenReturn(true);
+
+        when(policyRepository.findById("busan-policy")).thenReturn(Optional.of(policy));
+        when(profileService.getActiveProfile(1L)).thenReturn(profile);
+        when(policyRegionRepository.findAllByPolicy_PolicyId("busan-policy"))
+                .thenReturn(List.of(policyRegionLink));
+
+        PolicyDetailResponseDTO response =
+                service.getPolicyDetailForMember("busan-policy", 1L);
+        PolicyDetailResponseDTO.ConditionResultDTO regionCondition = response.conditions().stream()
+                .filter(condition -> condition.type()
+                        == com.hyeja.domain.policy.enums.EligibilityConditionType.REGION)
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(regionCondition.status()).isEqualTo(
+                com.hyeja.domain.policy.enums.EligibilityStatus.DISABLE);
+        assertThat(regionCondition.policyCondition()).isEqualTo("부산광역시");
+        assertThat(regionCondition.memberValue()).isEqualTo("서울특별시 성동구");
+    }
+
+    @Test
+    void returnsMemberPolicyPageWithRegionsAndFavoriteStatus() {
+        LocalDate today = LocalDate.now(clock);
+        Member member = Member.builder()
+                .email("member@example.com")
+                .password("encoded-password")
+                .nickname("회원")
+                .build();
+        Region region = Region.builder()
+                .regionCode("11440")
+                .sigunguName("서울특별시 마포구")
+                .build();
+        Profile profile = Profile.builder()
+                .member(member)
+                .region(region)
+                .birth(today.minusYears(26))
+                .employmentCode(EmploymentStatus.EMPLOYED)
+                .houselessYn(true)
+                .build();
+        Policy policy = Policy.builder()
+                .policyId("POLICY-1")
+                .policyName("청년 월세 지원")
+                .categories(Set.of(PolicyCategory.MONTHLY_RENT))
+                .ageLimitYn(true)
+                .minAge(19)
+                .maxAge(39)
+                .applyPeriodCode(PolicyApplyPeriod.SPECIFIC_PERIOD)
+                .applyEndDate(today.plusDays(4))
+                .build();
+        PageRequest pageRequest = PageRequest.of(0, 8, PolicySort.DEADLINE.toSort());
+        when(profileService.getActiveProfile(1L)).thenReturn(profile);
+        when(policyRepository.findHousingPoliciesForMember(
+                PolicyCategory.MONTHLY_RENT.name(),
+                true,
+                today,
+                26,
+                true,
+                "EMPLOYED",
+                "11440",
+                pageRequest
+        )).thenReturn(new PageImpl<>(List.of(policy), pageRequest, 9));
+        when(policyRegionRepository.findAllActiveByPolicyIds(List.of("POLICY-1")))
+                .thenReturn(List.of(PolicyRegion.builder().policy(policy).region(region).build()));
+        when(favoriteRepository.findActivePolicyIds(1L, List.of("POLICY-1")))
+                .thenReturn(Set.of("POLICY-1"));
+
+        PolicyListDTO result = service.getHousingPoliciesForMember(
+                1L,
+                PolicyCategory.MONTHLY_RENT,
+                PolicySort.DEADLINE,
+                true,
+                0,
+                8
+        );
+
+        assertThat(result.getPolicies()).singleElement().satisfies(item -> {
+            assertThat(item.getPolicyId()).isEqualTo("POLICY-1");
+            assertThat(item.getCategoryNames()).containsExactly("월세");
+            assertThat(item.getRegions()).singleElement().satisfies(itemRegion -> {
+                assertThat(itemRegion.getRegionCode()).isEqualTo("11440");
+                assertThat(itemRegion.getRegionName()).isEqualTo("서울특별시 마포구");
+            });
+            assertThat(item.isNationwide()).isFalse();
+            assertThat(item.getRegionSummary()).isEqualTo("서울특별시 마포구");
+            assertThat(item.getApplyPeriodCode()).isEqualTo(PolicyApplyPeriod.SPECIFIC_PERIOD);
+            assertThat(item.getDDay()).isEqualTo(4);
+            assertThat(item.isFavoriteYn()).isTrue();
+        });
+        assertThat(result.getTotalElements()).isEqualTo(9);
+        assertThat(result.getTotalPages()).isEqualTo(2);
+        assertThat(result.isHasNext()).isTrue();
+        verify(profileService).getActiveProfile(1L);
+    }
+
+    private Set<PolicyEmploymentCondition> mapEmploymentConditions(String codes) {
+        PolicyItem item = new PolicyItem();
+        item.setPolicyId("employment-test");
+        item.setPolicyName("취업 조건 테스트");
+        item.setCategory("주거");
+        item.setEmploymentCodes(codes);
+        item.setApplyPeriodCode("57002");
+        return apiConverter.convert(item, PolicyCategory.OTHER, null,
+                PolicyIncomeCondition.UNKNOWN, null, null).getEmploymentCodes();
+    }
+}

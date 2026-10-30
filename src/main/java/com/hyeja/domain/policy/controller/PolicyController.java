@@ -1,0 +1,250 @@
+package com.hyeja.domain.policy.controller;
+
+import com.hyeja.domain.policy.dto.PolicyDetailResponseDTO;
+import com.hyeja.domain.policy.dto.PolicyGuestResponseDTO;
+import com.hyeja.domain.policy.dto.PolicyResponseDTO.PolicyListDTO;
+import com.hyeja.domain.policy.dto.PolicySearchResponseDTO;
+import com.hyeja.domain.policy.enums.PolicyCategory;
+import com.hyeja.domain.policy.enums.PolicySort;
+import com.hyeja.domain.policy.service.PolicyService;
+import com.hyeja.domain.policy.service.PolicySearchService;
+import com.hyeja.global.apiPayload.ApiResponse;
+import com.hyeja.global.apiPayload.status.ErrorStatus;
+import com.hyeja.global.exception.GeneralException;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.enums.ParameterIn;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@Tag(name = "정책", description = "정책 관련 API")
+@RestController
+@RequestMapping("/api/policies")
+@RequiredArgsConstructor
+public class PolicyController {
+
+    private final PolicyService policyService;
+    private final PolicySearchService policySearchService;
+
+    @Operation(
+            summary = "회원 맞춤 정책 검색",
+            description = "검색 질문 또는 월세·전세·청약·공공임대 해시태그를 분석해 "
+                    + "회원 조건별 신청 가능 여부와 개인화 이유를 최대 20건 반환합니다."
+    )
+    @GetMapping("/search")
+    public ApiResponse<PolicySearchResponseDTO> searchPolicies(
+            @Parameter(hidden = true) @AuthenticationPrincipal Long memberId,
+            @RequestParam("query") String query) {
+        return ApiResponse.onSuccess(policySearchService.search(memberId, query));
+    }
+
+    @Operation(
+            summary = "주거 정책 동기화",
+            description = "외부 정책 API에서 청년 주거 정책을 조회하여 데이터베이스에 동기화합니다. 관리자(ADMIN)만 호출할 수 있습니다. "
+                    + "페이지 요청이 재시도까지 실패하면 멈추고 502를 반환하며, 그때까지 저장한 정책은 유지됩니다."
+    )
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "200",
+                    description = "동기화 완료 (SUCCESS_001), result에 저장 건수 문구"
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "401",
+                    description = "토큰 없음·잘못된 토큰 (COMMON_002)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "403",
+                    description = "관리자가 아님 (COMMON_004)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "502",
+                    description = "온통청년 API 요청 실패로 중간에 멈춤 (POLICY_002). result.stoppedPage·result.savedCount",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            )
+    })
+    @PostMapping("/sync")
+    public ApiResponse<String> syncPolicies() {
+        int savedCount = policyService.fetchAndSaveHousingPolicies();
+        return ApiResponse.onSuccess(
+                "온통청년 주거 정책 " + savedCount + "건 동기화가 완료되었습니다.");
+    }
+
+    @Operation(
+            summary = "비로그인 주거 정책 목록 조회",
+            description = "인증 없이 진행 중인 주거 정책을 카테고리·정렬 조건으로 페이지 조회합니다. "
+                    + "마감일순에서는 상시 정책을 기간 지정 정책 뒤에 반환합니다."
+    )
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "200",
+                    description = "비로그인 주거 정책 목록 조회 성공"
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "400",
+                    description = "잘못된 필터·정렬·페이지 조건 (COMMON_001)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            )
+    })
+    @GetMapping("/housing")
+    public ApiResponse<PolicyGuestResponseDTO.PolicyListDTO> getGuestHousingPolicies(
+            @Parameter(
+                    name = "category",
+                    description = "정책 카테고리. 생략하면 전체",
+                    in = ParameterIn.QUERY,
+                    example = "MONTHLY_RENT"
+            )
+            @RequestParam(name = "category", required = false) PolicyCategory category,
+            @Parameter(
+                    name = "sort",
+                    description = "정렬 기준: DEADLINE(마감일), VIEW_COUNT(조회수), NAME(정책명)",
+                    in = ParameterIn.QUERY,
+                    example = "DEADLINE"
+            )
+            @RequestParam(name = "sort", defaultValue = "DEADLINE") PolicySort sort,
+            @Parameter(
+                    name = "page",
+                    description = "페이지 번호(0부터 시작)",
+                    in = ParameterIn.QUERY,
+                    example = "0"
+            )
+            @RequestParam(name = "page", defaultValue = "0")
+            @PositiveOrZero(message = "페이지 번호는 0 이상이어야 합니다.") int page,
+            @Parameter(
+                    name = "size",
+                    description = "페이지당 정책 개수",
+                    in = ParameterIn.QUERY,
+                    example = "8"
+            )
+            @RequestParam(name = "size", defaultValue = "8")
+            @Positive(message = "페이지 크기는 양수여야 합니다.")
+            @Max(value = 50, message = "페이지 크기는 50 이하여야 합니다.") int size
+    ) {
+        return ApiResponse.onSuccess(
+                policyService.getGuestHousingPolicies(category, sort, page, size));
+    }
+
+    @Operation(
+            summary = "로그인 회원용 주거 정책 목록 조회",
+            description = "로그인한 회원을 기준으로 진행 중인 주거 정책을 카테고리·정렬 조건으로 조회합니다. "
+                    + "onlyEligible이 true이면 회원의 필수 조건(지역·나이·취업·무주택)에 맞는 정책만 반환합니다."
+    )
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "200",
+                    description = "주거 정책 목록 조회 성공"
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "400",
+                    description = "잘못된 필터·페이지 조건 (COMMON_001)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "401",
+                    description = "인증 실패 (COMMON_002)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "404",
+                    description = "없거나 탈퇴한 회원 (MEMBER_001) / 등록된 조건 없음 (PROFILE_001)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            )
+    })
+    @GetMapping("/housing/me")
+    public ApiResponse<PolicyListDTO> getHousingPoliciesForMember(
+            @Parameter(hidden = true) @AuthenticationPrincipal Long memberId,
+            @Parameter(
+                    name = "category",
+                    description = "정책 카테고리. 생략하면 전체",
+                    in = ParameterIn.QUERY,
+                    example = "MONTHLY_RENT"
+            )
+            @RequestParam(name = "category", required = false) PolicyCategory category,
+            @Parameter(
+                    name = "sort",
+                    description = "정렬 기준: DEADLINE(마감일), VIEW_COUNT(조회수), NAME(정책명)",
+                    in = ParameterIn.QUERY,
+                    example = "DEADLINE"
+            )
+            @RequestParam(name = "sort", defaultValue = "DEADLINE") PolicySort sort,
+            @Parameter(
+                    name = "onlyEligible",
+                    description = "회원의 필수 조건에 맞는 정책만 조회할지 여부",
+                    in = ParameterIn.QUERY,
+                    example = "false"
+            )
+            @RequestParam(name = "onlyEligible", defaultValue = "false") boolean onlyEligible,
+            @Parameter(
+                    name = "page",
+                    description = "페이지 번호(0부터 시작)",
+                    in = ParameterIn.QUERY,
+                    example = "0"
+            )
+            @RequestParam(name = "page", defaultValue = "0")
+            @PositiveOrZero(message = "페이지 번호는 0 이상이어야 합니다.") int page,
+            @Parameter(
+                    name = "size",
+                    description = "페이지당 정책 개수",
+                    in = ParameterIn.QUERY,
+                    example = "8"
+            )
+            @RequestParam(name = "size", defaultValue = "8")
+            @Positive(message = "페이지 크기는 양수여야 합니다.")
+            @Max(value = 50, message = "페이지 크기는 50 이하여야 합니다.") int size
+    ) {
+        return ApiResponse.onSuccess(policyService.getHousingPoliciesForMember(
+                memberId, category, sort, onlyEligible, page, size));
+    }
+
+    @Operation(
+            summary = "정책 상세 조회",
+            description = "비로그인도 조회할 수 있습니다. 로그인하면(토큰) 회원 조건별 가능 여부(conditions)·종합 판정·관심 여부를 함께 내려주고, "
+                    + "비로그인이면 conditions는 빈 목록, overallStatus는 null, isFavorite은 false입니다. "
+                    + "토큰을 보냈는데 무효하면(만료·위조·로그아웃, 탈퇴할 때 쓴 토큰) 비로그인으로 보지 않고 401입니다."
+    )
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "200",
+                    description = "정책 상세 조회 성공 (SUCCESS_001)"
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "401",
+                    description = "보낸 토큰이 무효함 - 만료·위조·로그아웃, 탈퇴할 때 쓴 토큰(블랙리스트) (COMMON_002)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "404",
+                    description = "없는 정책 (POLICY_001) / 로그인했지만 없거나 탈퇴한 회원 (MEMBER_001) / 조건 없음 (PROFILE_001)",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            )
+    })
+    @GetMapping("/{policyId}")
+    public ApiResponse<PolicyDetailResponseDTO> getPolicyDetailForMember(
+            @PathVariable("policyId") String policyId,
+            @AuthenticationPrincipal Long memberId,
+            @Parameter(hidden = true) @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization) {
+        // 상세는 비로그인도 볼 수 있어서 인증 필터가 무효한 토큰을 막지 않습니다(SecurityConfig 허용 목록).
+        // 토큰을 보냈는데 무효하면(만료·위조·로그아웃, 탈퇴할 때 쓴 토큰) 비로그인 화면 대신 다른 API처럼 401로 알려, 프론트가 재로그인을 안내하게 합니다.
+        if (memberId == null && authorization != null) {
+            throw new GeneralException(ErrorStatus.UNAUTHORIZED);
+        }
+        return ApiResponse.onSuccess(
+                policyService.getPolicyDetailForMember(policyId, memberId));
+    }
+}
